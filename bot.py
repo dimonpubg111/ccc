@@ -1,8 +1,9 @@
 import os
 import asyncio
 import logging
-import yt_dlp
 import random
+import requests
+import yt_dlp
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -11,71 +12,95 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 logging.basicConfig(level=logging.INFO)
 
 TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = 8197564304  # вставь свой ID
+ADMIN_ID = 8197564304
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-user_data = {}
+cache = {}
 
-# 💥 БОМБИЧЕСКОЕ ПРИВЕТСТВИЕ
-WELCOME_TEXTS = [
-    "🔥 Добро пожаловать в MUSIC GOD BOT 🔥",
-    "🎧 Тут музыка летает быстрее света",
-    "💣 Включай треки — будет разнос",
-    "🚀 Музыкальный портал активирован"
+# 💥 ЖИВОЕ ПРИВЕТСТВИЕ
+WELCOME = [
+    "🔥 MUSIC ENGINE ONLINE",
+    "🎧 Бот запущен — качай музыку",
+    "⚡ Готов к взрыву треков",
+    "🚀 Sound system activated"
 ]
 
 # ---------------- START ----------------
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    await message.answer(random.choice(WELCOME_TEXTS))
+    await message.answer(random.choice(WELCOME))
 
-# ---------------- ADMIN PANEL ----------------
+# ---------------- ADMIN ----------------
 @dp.message(Command("admin"))
 async def admin(message: types.Message):
     if message.from_user.id != ADMIN_ID:
-        return await message.answer("⛔ доступ закрыт")
+        return await message.answer("⛔ нет доступа")
 
     await message.answer(
         "🛠 ADMIN PANEL PRO\n\n"
-        "/stats - пользователи\n"
-        "/ping - бот жив?\n"
-        "/clear - очистка кеша"
+        "/stats - users\n"
+        "/cache - кеш\n"
+        "/clear - очистить\n"
+        "/ping - проверка"
     )
 
 @dp.message(Command("stats"))
 async def stats(message: types.Message):
     if message.from_user.id != ADMIN_ID:
         return
-    await message.answer(f"👥 users: {len(user_data)}")
+    await message.answer(f"👥 users: {len(cache)}")
 
-@dp.message(Command("ping"))
-async def ping(message: types.Message):
-    await message.answer("🏓 alive")
+@dp.message(Command("cache"))
+async def show_cache(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    await message.answer(f"🧠 cache size: {len(cache)}")
 
 @dp.message(Command("clear"))
 async def clear(message: types.Message):
     if message.from_user.id != ADMIN_ID:
         return
-    user_data.clear()
-    await message.answer("🧹 кеш очищен")
+    cache.clear()
+    await message.answer("🧹 cleared")
 
-# ---------------- MAIN ----------------
+@dp.message(Command("ping"))
+async def ping(message: types.Message):
+    await message.answer("🏓 alive")
+
+# ---------------- SOUND SEARCH (НОВЫЙ МЕТОД) ----------------
+def soundcloud_search(query):
+    url = f"https://m.soundcloud.com/search/sounds?q={query}"
+    r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
+    
+    if r.status_code != 200:
+        return []
+
+    # простой парсинг ссылок
+    links = []
+    for line in r.text.split("https://"):
+        if "soundcloud.com" in line:
+            link = "https://" + line.split('"')[0]
+            if link not in links:
+                links.append(link)
+
+    return links[:5]
+
+# ---------------- HANDLE ----------------
 @dp.message()
 async def handle(message: types.Message):
     text = message.text.strip()
 
     # 🎬 VIDEO
     if "http" in text:
-        await message.answer("📥 качаю видео...")
+        await message.answer("📥 скачиваю видео...")
 
         try:
             ydl_opts = {
                 "format": "mp4",
                 "outtmpl": "video.%(ext)s",
-                "quiet": True,
-                "socket_timeout": 10
+                "quiet": True
             }
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -84,84 +109,40 @@ async def handle(message: types.Message):
 
             await message.answer_video(types.FSInputFile(file))
 
-        except:
+        except Exception as e:
+            logging.error(e)
             await message.answer("❌ ошибка видео")
         return
 
-    # 🎧 MUSIC SEARCH (ФИКС ДУБЛЕЙ)
+    # 🎧 MUSIC SEARCH (НОВЫЙ ENGINE)
     await message.answer("🔎 ищу музыку...")
 
-    try:
-        ydl_opts = {
-            "quiet": True,
-            "noplaylist": True,
-            "socket_timeout": 8,
-            "extract_flat": True
-        }
+    results = soundcloud_search(text)
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(f"ytsearch10:{text}", download=False)
+    if not results:
+        await message.answer("❌ ничего не найдено")
+        return
 
-        entries = info.get("entries", [])
+    cache[message.from_user.id] = results
 
-        # ❌ УБИРАЕМ ДУБЛИКАТЫ
-        seen = set()
-        results = []
-        for e in entries:
-            if not e:
-                continue
-            title = e.get("title")
-            if title and title not in seen:
-                seen.add(title)
-                results.append(e)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"🎵 трек {i+1}", callback_data=f"play|{i}")]
+        for i in range(len(results))
+    ])
 
-        results = results[:5]
+    await message.answer("🎧 выбери:", reply_markup=kb)
 
-        if not results:
-            await message.answer("❌ ничего не найдено")
-            return
+# ---------------- PLAY ----------------
+@dp.callback_query(lambda c: c.data.startswith("play"))
+async def play(callback: types.CallbackQuery):
+    i = int(callback.data.split("|")[1])
+    url = cache[callback.from_user.id][i]
 
-        user_data[message.from_user.id] = results
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬇️ скачать", callback_data=f"dl|{url}")]
+    ])
 
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(
-                text=r["title"][:40],
-                callback_data=f"sel|{i}"
-            )]
-            for i, r in enumerate(results)
-        ])
-
-        await message.answer("🎧 выбери трек:", reply_markup=kb)
-
-    except Exception as e:
-        logging.error(e)
-        await message.answer("❌ ошибка поиска")
-
-# ---------------- SELECT ----------------
-@dp.callback_query(lambda c: c.data.startswith("sel"))
-async def select(callback: types.CallbackQuery):
-    try:
-        i = int(callback.data.split("|")[1])
-        uid = callback.from_user.id
-
-        results = user_data.get(uid, [])
-
-        if i >= len(results):
-            return await callback.message.answer("❌ ошибка выбора")
-
-        url = results[i]["url"]
-
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(
-                text="⬇️ скачать",
-                callback_data=f"dl|{url}"
-            )]
-        ])
-
-        await callback.message.answer("готово 👇", reply_markup=kb)
-
-    except:
-        await callback.message.answer("❌ ошибка")
+    await callback.message.answer("готово 👇", reply_markup=kb)
 
 # ---------------- DOWNLOAD ----------------
 @dp.callback_query(lambda c: c.data.startswith("dl"))
@@ -174,8 +155,7 @@ async def download(callback: types.CallbackQuery):
         ydl_opts = {
             "format": "bestaudio/best",
             "outtmpl": file_path,
-            "quiet": True,
-            "socket_timeout": 10
+            "quiet": True
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -183,7 +163,8 @@ async def download(callback: types.CallbackQuery):
 
         await callback.message.answer_audio(types.FSInputFile(file_path))
 
-    except:
+    except Exception as e:
+        logging.error(e)
         await callback.message.answer("❌ ошибка загрузки")
 
 # ---------------- RUN ----------------
