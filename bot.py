@@ -1,50 +1,44 @@
 import os
-import asyncio
-import logging
-import yt_dlp
+import requests
+import random
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-logging.basicConfig(level=logging.INFO)
-
 TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = 8197564304  # <-- вставь свой ID
-
-if not TOKEN:
-    raise ValueError("BOT_TOKEN missing")
+ADMIN_ID = 8197564304  # твой ID
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 user_cache = {}
 
-# 💥 РУССКИЕ ПРИВЕТСТВИЯ (как ты хотел)
+# 💥 ПРИВЕТСТВИЕ (как ты хотел — простое и живое)
 WELCOME = [
-    "🔥 Привет! Я MUSIC BOT — качай любые треки",
-    "🎧 Добро пожаловать! Сейчас найдём тебе музыку",
-    "⚡ Готов к взрыву музыки",
-    "🚀 Включай звук — поехали"
+    "🔥 Привет! Я MUSIC BOT",
+    "🎧 Готов найти любую музыку",
+    "⚡ Введи название трека",
+    "🚀 Музыка уже ждёт тебя"
 ]
 
 # ---------------- START ----------------
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    await message.answer(WELCOME[0])
+    await message.answer(random.choice(WELCOME))
 
-# ---------------- ADMIN ----------------
+# ---------------- ADMIN PANEL ----------------
 @dp.message(Command("admin"))
 async def admin(message: types.Message):
     if message.from_user.id != ADMIN_ID:
         return await message.answer("⛔ нет доступа")
 
     await message.answer(
-        "🛠 АДМИН ПАНЕЛЬ\n\n"
-        "/stats - пользователи\n"
-        "/cache - посмотреть кеш\n"
+        "🛠 ADMIN PANEL\n\n"
+        "/stats - users\n"
+        "/cache - показать кеш\n"
         "/clear - очистить кеш\n"
-        "/ping - проверка"
+        "/ping - статус"
     )
 
 @dp.message(Command("stats"))
@@ -57,7 +51,7 @@ async def stats(message: types.Message):
 async def cache(message: types.Message):
     if message.from_user.id != ADMIN_ID:
         return
-    await message.answer(f"🧠 кеш: {len(user_cache)} пользователей")
+    await message.answer(f"🧠 кеш записей: {len(user_cache)}")
 
 @dp.message(Command("clear"))
 async def clear(message: types.Message):
@@ -68,110 +62,70 @@ async def clear(message: types.Message):
 
 @dp.message(Command("ping"))
 async def ping(message: types.Message):
-    await message.answer("🏓 бот работает")
+    await message.answer("🏓 bot alive")
 
-# ---------------- MUSIC SEARCH ----------------
+# ---------------- MUSIC API (STABLE ENGINE) ----------------
+def search_music(query: str):
+    url = "https://api.deezer.com/search"
+    r = requests.get(url, params={"q": query})
+    data = r.json()
+
+    results = []
+
+    for item in data.get("data", [])[:5]:
+        results.append({
+            "title": item["title"],
+            "artist": item["artist"]["name"],
+            "preview": item["preview"]
+        })
+
+    return results
+
+# ---------------- HANDLE ----------------
 @dp.message()
 async def handle(message: types.Message):
     text = message.text.strip()
 
-    if "http" in text:
-        await message.answer("📥 скачиваю видео/аудио...")
-
-        try:
-            ydl_opts = {
-                "format": "bestaudio/best",
-                "outtmpl": "music.%(ext)s",
-                "quiet": True,
-                "postprocessors": [{
-                    "key": "FFmpegExtractAudio",
-                    "preferredcodec": "mp3",
-                    "preferredquality": "192"
-                }]
-            }
-
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(text, download=True)
-                file = ydl.prepare_filename(info).replace(".webm", ".mp3")
-
-            await message.answer_audio(types.FSInputFile(file))
-
-        except Exception as e:
-            logging.error(e)
-            await message.answer("❌ ошибка скачивания")
-
+    if text.startswith("http"):
+        await message.answer("📥 видео режим пока отдельно")
         return
 
     await message.answer("🔎 ищу музыку...")
 
-    try:
-        ydl_opts = {
-            "quiet": True,
-            "noplaylist": True,
-            "format": "bestaudio"
-        }
+    results = search_music(text)
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(f"ytsearch5:{text}", download=False)
+    if not results:
+        await message.answer("❌ ничего не найдено")
+        return
 
-        results = info.get("entries", [])
+    user_cache[message.from_user.id] = results
 
-        if not results:
-            await message.answer("❌ ничего не найдено")
-            return
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=f"🎵 {r['title']} - {r['artist']}",
+            callback_data=f"play|{i}"
+        )]
+        for i, r in enumerate(results)
+    ])
 
-        user_cache[message.from_user.id] = results
-
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(
-                text=r["title"][:40],
-                callback_data=f"play|{i}"
-            )]
-            for i, r in enumerate(results)
-        ])
-
-        await message.answer("🎧 выбери трек:", reply_markup=kb)
-
-    except Exception as e:
-        logging.error(e)
-        await message.answer("❌ ошибка поиска")
+    await message.answer("🎧 выбери трек:", reply_markup=kb)
 
 # ---------------- PLAY ----------------
 @dp.callback_query(lambda c: c.data.startswith("play"))
 async def play(callback: types.CallbackQuery):
     i = int(callback.data.split("|")[1])
-    uid = callback.from_user.id
+    data = user_cache.get(callback.from_user.id, [])
 
-    results = user_cache.get(uid, [])
-
-    if i >= len(results):
+    if i >= len(data):
         return await callback.message.answer("❌ ошибка выбора")
 
-    url = results[i]["webpage_url"]
+    track = data[i]
 
-    await callback.message.answer("⬇️ скачиваю трек...")
-
-    try:
-        ydl_opts = {
-            "format": "bestaudio/best",
-            "outtmpl": "music.%(ext)s",
-            "quiet": True,
-            "postprocessors": [{
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": "192"
-            }]
-        }
-
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            file = ydl.prepare_filename(info).replace(".webm", ".mp3")
-
-        await callback.message.answer_audio(types.FSInputFile(file))
-
-    except Exception as e:
-        logging.error(e)
-        await callback.message.answer("❌ ошибка загрузки")
+    await callback.message.answer_audio(
+        audio=track["preview"],
+        title=track["title"],
+        performer=track["artist"]
+    )
 
 # ---------------- RUN ----------------
 async def main():
