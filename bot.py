@@ -1,6 +1,7 @@
 import os
-import random
+import asyncio
 import requests
+import random
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
