@@ -1,5 +1,2 @@
 aiogram
 yt-dlp
-ffmpeg-python
-aiosqlite
-
